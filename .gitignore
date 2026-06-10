@@ -1,0 +1,7 @@
+node_modules/
+dist/
+target/
+*.wasm
+.env
+.env.local
+*.lock.bak

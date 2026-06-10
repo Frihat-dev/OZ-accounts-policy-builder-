@@ -1,0 +1,258 @@
+/**
+ * Tests for the Rust code generator.
+ *
+ * Verifies that generated contracts:
+ *   - Use the real OZ policy interface (install / enforce / uninstall / can_enforce)
+ *   - Accept typed install params (not Map<Symbol, Val>)
+ *   - Use ContextRule (not BytesN<32>) with context_rule.id as storage key
+ *   - Use policy_panic (not bare panic!)
+ *   - Are #![no_std] and have no unsafe blocks
+ */
+
+import { describe, it, expect } from '@jest/globals';
+import {
+  generateTimeBoundSource,
+  generateCallFilterSource,
+  generateFrequencyLimitSource,
+} from '../../packages/policy-synthesizer/src/codegen.js';
+import type { PolicySpec } from '../../packages/policy-synthesizer/src/types.js';
+
+function makeTimeBoundSpec(): PolicySpec {
+  return {
+    kind: 'custom_time_bound',
+    isStandardOz: false,
+    label: 'Time Bound Test',
+    contractName: 'test_time_bound',
+    config: {
+      kind: 'custom_time_bound',
+      startLedger: 100,
+      endLedger: 200,
+    },
+    rationale: 'test',
+  };
+}
+
+function makeCallFilterSpec(): PolicySpec {
+  return {
+    kind: 'custom_call_filter',
+    isStandardOz: false,
+    label: 'Call Filter Test',
+    contractName: 'test_call_filter',
+    config: {
+      kind: 'custom_call_filter',
+      allowedCalls: [
+        {
+          contractId: 'CTEST_CONTRACT_1234567890',
+          functionName: 'transfer',
+          argConstraints: [],
+        },
+      ],
+    },
+    rationale: 'test',
+  };
+}
+
+function makeFrequencySpec(): PolicySpec {
+  return {
+    kind: 'custom_frequency_limit',
+    isStandardOz: false,
+    label: 'Frequency Limit Test',
+    contractName: 'test_freq_limit',
+    config: {
+      kind: 'custom_frequency_limit',
+      maxCallsPerWindow: 5,
+      windowSeconds: 86400,
+    },
+    rationale: 'test',
+  };
+}
+
+describe('generateTimeBoundSource', () => {
+  it('generates valid Rust with config values in comments', () => {
+    const spec = makeTimeBoundSpec();
+    const output = generateTimeBoundSource(spec);
+
+    expect(output.contractName).toBe('test_time_bound');
+    expect(output.source).toContain('#![no_std]');
+    // Values appear in the doc-comment header (not as baked-in constants —
+    // they are passed via install_params at runtime)
+    expect(output.source).toContain('Start ledger: 100');
+    expect(output.source).toContain('End ledger:   200');
+  });
+
+  it('uses the OZ policy interface (typed params + ContextRule)', () => {
+    const { source } = generateTimeBoundSource(makeTimeBoundSpec());
+
+    // Typed install params struct
+    expect(source).toContain('TimeBoundParams');
+    // New OZ function signatures
+    expect(source).toContain('install_params: TimeBoundParams');
+    expect(source).toContain('context_rule: ContextRule');
+    // DataKey uses u32 (context_rule.id), not BytesN<32>
+    expect(source).toContain('DataKey::Config(smart_account, context_rule.id)');
+    // enforce uses Context not AuthInvocation
+    expect(source).toContain('_context: Context');
+    expect(source).toContain('_authenticated_signers: Vec<Signer>');
+  });
+
+  it('includes all four policy lifecycle functions plus can_enforce', () => {
+    const { source } = generateTimeBoundSource(makeTimeBoundSpec());
+
+    expect(source).toContain('fn install(');
+    expect(source).toContain('fn enforce(');
+    expect(source).toContain('fn uninstall(');
+    expect(source).toContain('fn can_enforce(');
+    // can_enforce returns bool, not EnforceDecision
+    expect(source).toContain('-> bool');
+  });
+
+  it('uses policy_panic, not bare panic', () => {
+    const { source } = generateTimeBoundSource(makeTimeBoundSpec());
+    expect(source).toContain('policy_panic');
+    expect(source).not.toContain('panic!("{}"');
+  });
+
+  it('segregates storage by (smart_account, context_rule.id)', () => {
+    const { source } = generateTimeBoundSource(makeTimeBoundSpec());
+    expect(source).toContain('DataKey::Config(smart_account');
+    expect(source).toContain('context_rule.id');
+    // Must NOT use old BytesN<32> key
+    expect(source).not.toContain('BytesN<32>');
+  });
+
+  it('does not contain unsafe blocks', () => {
+    const { source } = generateTimeBoundSource(makeTimeBoundSpec());
+    expect(source).not.toContain('unsafe {');
+    expect(source).not.toContain('unsafe fn');
+  });
+
+  it('generates valid Cargo.toml', () => {
+    const { cargoToml } = generateTimeBoundSource(makeTimeBoundSpec());
+
+    expect(cargoToml).toContain('test_time_bound');
+    expect(cargoToml).toContain('soroban-sdk');
+    expect(cargoToml).toContain('overflow-checks = true');
+    expect(cargoToml).toContain('cdylib');
+  });
+});
+
+describe('generateCallFilterSource', () => {
+  it('includes the observed contract and function names in comments', () => {
+    const { source } = generateCallFilterSource(makeCallFilterSpec());
+
+    expect(source).toContain('CTEST_CONTRACT_1234567890');
+    expect(source).toContain('transfer');
+    expect(source).toContain('GENERATED BY OZ POLICY BUILDER');
+  });
+
+  it('uses the OZ policy interface', () => {
+    const { source } = generateCallFilterSource(makeCallFilterSpec());
+
+    expect(source).toContain('CallFilterParams');
+    expect(source).toContain('install_params: CallFilterParams');
+    expect(source).toContain('context_rule: ContextRule');
+    expect(source).toContain('context_rule.id');
+    expect(source).not.toContain('BytesN<32>');
+  });
+
+  it('includes richer ArgConstraint enum (beats pollywallet)', () => {
+    const { source } = generateCallFilterSource(makeCallFilterSpec());
+
+    expect(source).toContain('ArgConstraint');
+    expect(source).toContain('ExactAddress');
+    expect(source).toContain('AmountMax');
+    expect(source).toContain('AmountMin');
+    expect(source).toContain('ExactValue');
+  });
+
+  it('includes all lifecycle functions', () => {
+    const { source } = generateCallFilterSource(makeCallFilterSpec());
+
+    expect(source).toContain('fn install(');
+    expect(source).toContain('fn can_enforce(');
+    expect(source).toContain('fn enforce(');
+    expect(source).toContain('fn uninstall(');
+    expect(source).toContain('-> bool');
+  });
+
+  it('does not contain unsafe blocks', () => {
+    const { source } = generateCallFilterSource(makeCallFilterSpec());
+    expect(source).not.toContain('unsafe {');
+  });
+});
+
+describe('generateFrequencyLimitSource', () => {
+  it('embeds config values in comment header', () => {
+    const { source } = generateFrequencyLimitSource(makeFrequencySpec());
+
+    // Values appear in the doc-comment header
+    expect(source).toContain('Max calls: 5');
+    expect(source).toContain('86400s window');
+  });
+
+  it('uses the OZ policy interface with typed params', () => {
+    const { source } = generateFrequencyLimitSource(makeFrequencySpec());
+
+    expect(source).toContain('FrequencyLimitParams');
+    expect(source).toContain('install_params: FrequencyLimitParams');
+    expect(source).toContain('context_rule: ContextRule');
+    expect(source).toContain('context_rule.id');
+    expect(source).not.toContain('BytesN<32>');
+  });
+
+  it('uses checked_add for overflow safety', () => {
+    const { source } = generateFrequencyLimitSource(makeFrequencySpec());
+    expect(source).toContain('checked_add');
+  });
+
+  it('includes storage segregation by (account, rule_id)', () => {
+    const { source } = generateFrequencyLimitSource(makeFrequencySpec());
+    expect(source).toContain('DataKey::State(smart_account');
+    expect(source).toContain('DataKey::Config(smart_account');
+  });
+
+  it('exposes get_state for introspection', () => {
+    const { source } = generateFrequencyLimitSource(makeFrequencySpec());
+    expect(source).toContain('fn get_state(');
+    expect(source).toContain('fn get_config(');
+  });
+});
+
+describe('Generated code safety invariants (all policies)', () => {
+  const generators = [
+    { name: 'time_bound', spec: makeTimeBoundSpec(), fn: generateTimeBoundSource },
+    { name: 'call_filter', spec: makeCallFilterSpec(), fn: generateCallFilterSource },
+    { name: 'frequency_limit', spec: makeFrequencySpec(), fn: generateFrequencyLimitSource },
+  ];
+
+  for (const { name, spec, fn } of generators) {
+    it(`${name}: starts with #![no_std]`, () => {
+      const { source } = fn(spec as PolicySpec);
+      expect(source).toContain('#![no_std]');
+    });
+
+    it(`${name}: uses oz_policy_trait imports`, () => {
+      const { source } = fn(spec as PolicySpec);
+      expect(source).toContain('oz_policy_trait');
+      // Must import the real OZ types
+      expect(source).toContain('ContextRule');
+      expect(source).toContain('PolicyError');
+      expect(source).toContain('Signer');
+    });
+
+    it(`${name}: no direct std usage`, () => {
+      const { source } = fn(spec as PolicySpec);
+      expect(source).not.toContain('use std::');
+      expect(source).not.toContain('extern crate std');
+    });
+
+    it(`${name}: no old-interface types`, () => {
+      const { source } = fn(spec as PolicySpec);
+      expect(source).not.toContain('AuthInvocation');
+      expect(source).not.toContain('EnforceDecision');
+      expect(source).not.toContain('require_config');
+      expect(source).not.toContain('Map<Symbol, Val>');
+      expect(source).not.toContain('BytesN<32>');
+    });
+  }
+});

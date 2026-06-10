@@ -1,0 +1,36 @@
+{
+  "name": "@oz-policy-builder/mcp-server",
+  "version": "0.1.0",
+  "description": "MCP server for OZ Policy Builder — record, synthesize, simulate, and verify Stellar smart account policies",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "oz-policy-mcp": "./dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@stellar/stellar-sdk": "^15.1.0",
+    "@anthropic-ai/sdk": "^0.102.0",
+    "@oz-policy-builder/tx-recorder": "*",
+    "@oz-policy-builder/policy-synthesizer": "*",
+    "@oz-policy-builder/sim-harness": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

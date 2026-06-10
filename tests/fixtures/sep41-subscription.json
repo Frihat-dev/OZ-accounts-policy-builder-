@@ -1,0 +1,32 @@
+{
+  "hash": "b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6",
+  "network": "testnet",
+  "ledger": 100001,
+  "timestamp": 1748086400,
+  "fee": "10000",
+  "invocations": [
+    {
+      "contractId": "CEURC_TOKEN_1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ0",
+      "contractName": "EURCToken",
+      "functionName": "transfer",
+      "args": [
+        { "index": 0, "type": "address", "value": "CACCOUNT_USER_1234567890ABCDEFGHIJKLMNOPQRSTUVWXY", "rawXdr": "" },
+        { "index": 1, "type": "address", "value": "CBILLING_CONTRACT_1234567890ABCDEFGHIJKLMNOPQRSTU", "rawXdr": "" },
+        { "index": 2, "type": "number", "value": "100000000", "rawXdr": "" }
+      ],
+      "subInvocations": [],
+      "success": true
+    }
+  ],
+  "assetTransfers": [
+    {
+      "assetCode": "EURC",
+      "issuer": "GCURRENCY_ISSUER_1234567890ABCDEFGHIJKLMNOPQRST",
+      "from": "CACCOUNT_USER_1234567890ABCDEFGHIJKLMNOPQRSTUVWXY",
+      "to": "CBILLING_CONTRACT_1234567890ABCDEFGHIJKLMNOPQRSTU",
+      "amount": "100000000"
+    }
+  ],
+  "ledgerChanges": [],
+  "rawEnvelope": "AAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB"
+}

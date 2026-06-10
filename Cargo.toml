@@ -1,0 +1,40 @@
+[workspace]
+members = [
+    "contracts/shared/policy-trait",
+    "contracts/policies/spending-limit",
+    "contracts/policies/time-bound",
+    "contracts/policies/call-filter",
+    "contracts/policies/frequency-limit",
+    "contracts/policies/composite",
+    "contracts/test-fixtures/mock-token",
+    "contracts/test-fixtures/mock-account",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+version = "0.1.0"
+repository = "https://github.com/oz-policy-builder/oz-policy-builder"
+
+[workspace.dependencies]
+soroban-sdk = { version = "22.0.1", features = [] }
+soroban-sdk-test = { version = "22.0.1", features = ["testutils"] }
+oz-policy-trait = { path = "contracts/shared/policy-trait" }
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true
+
+[profile.test]
+overflow-checks = true
