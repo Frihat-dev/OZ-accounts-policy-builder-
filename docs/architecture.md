@@ -157,6 +157,7 @@ Mode (b) — Novel constraint required
 
 ## Table of Contents
 
+0. [How It Works](#how-it-works) — start here for a plain-English overview
 1. [Stellar Stack Context](#1-stellar-stack-context)
 2. [SCF Grant — Default vs. This Implementation](#2-scf-grant--default-vs-this-implementation)
 3. [System Architecture Overview](#3-system-architecture-overview)
@@ -167,6 +168,7 @@ Mode (b) — Novel constraint required
 8. [AI Integration Architecture](#8-ai-integration-architecture)
 9. [Security Architecture](#9-security-architecture)
 10. [Deployment Architecture](#10-deployment-architecture)
+11. [Error Handling & Failure Modes](#11-error-handling--failure-modes)
 
 ---
 
@@ -217,7 +219,7 @@ This tool integrates with multiple layers of the Stellar ecosystem. Understandin
 | Stack Layer | Touch Point | How |
 |------------|------------|------|
 | **Stellar Core** | Transaction envelopes, ledger data | Via Horizon REST + XDR parsing |
-| **Soroban RPC** | `simulate_transaction`, `send_transaction` | For permit/deny simulation |
+| **Soroban RPC** | `simulate_transaction` | For permit/deny simulation (never `send_transaction`) |
 | **Soroban Contracts** | Policy WASM deployment and invocation | Generates + tests compilable Rust |
 | **OZ Smart Accounts** | ContextRule install, policy interface | Generates OZ-compatible config + code |
 | **SAC Tokens** | Asset transfer extraction (7 decimal places) | Parsed from `InvokeHostFunctionOp` |
@@ -724,7 +726,7 @@ interface AssetTransfer {
 │  │  Coverage reporter                                           │  │
 │  │  • permit_results: CaseResult[]                             │  │
 │  │  • deny_results: CaseResult[]                               │  │
-│  │  • coverage_score: f64  (deny cases covered / total)       │  │
+│  │  • coverage_score: number  (deny cases covered / total, 0–1)│  │
 │  │  • issues: Issue[]  (unexpected pass/fail)                  │  │
 │  └────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────┘
@@ -802,6 +804,14 @@ interface AssetTransfer {
 │  │                                                              │  │
 │  │  explain_policy                                              │  │
 │  │    trigger: "what does this policy allow/deny?"             │  │
+│  │                                                              │  │
+│  │  propose_delegation                                          │  │
+│  │    trigger: agent self-declaration workflow                  │  │
+│  │    input:   PlannedOp[] — planned (contract, fn, args,      │  │
+│  │             frequency, amounts) tuples                       │  │
+│  │    output:  minimal policy set + plain-English allow/deny   │  │
+│  │             summary + unsigned install XDR for human review  │  │
+│  │    note:    no on-chain action until human signs XDR        │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                                                                    │
 │  Clarification logic:                                              │
@@ -1122,10 +1132,10 @@ The four constraint dimensions that cover any delegation scenario:
 
 Confirmed from `Cargo.toml` workspace members:
 
-| Workspace member | Type | Deployed? | In TESTNET.md / MAINNET.md? |
+| Workspace member | Type | Deployed? | In deployment docs? |
 |-----------------|------|-----------|-----------------------------|
 | `policy-trait` | Library crate (no `#[contract]`) | No | No |
-| `spending-limit` | Soroban contract | Yes | Yes |
+| `spending-limit` | Soroban contract | Yes | Yes (`docs/TESTNET.md`, `docs/MAINNET.md`) |
 | `time-bound` | Soroban contract | Yes | Yes |
 | `call-filter` | Soroban contract | Yes | Yes |
 | `frequency-limit` | Soroban contract | Yes | Yes |
@@ -1133,9 +1143,10 @@ Confirmed from `Cargo.toml` workspace members:
 | `mock-token` | Test fixture | Testnet integration only | No |
 | `mock-account` | Test fixture | Testnet integration only | No |
 
-**Deployable policy contracts: 5. Library crates: 1. Test fixtures: 2.**
+`docs/TESTNET.md` and `docs/MAINNET.md` are generated at the T1 milestone and record
+the deployed C-address for each contract on each network.
 
----
+**Deployable policy contracts: 5. Library crates: 1. Test fixtures: 2.**
 
 ### 7.4 Storage Key Architecture
 
@@ -1423,6 +1434,70 @@ The `demo/run-demo.sh` script generates reproducible output in `demo/output/`:
 
 ---
 
+## 11. Error Handling & Failure Modes
+
+### 11.1 Network Failures During Recording
+
+| Failure | Behaviour |
+|---------|-----------|
+| Horizon unreachable | `recordFromHash` throws `RecorderError.HORIZON_UNAVAILABLE`; session not created |
+| Transaction not found (404) | `RecorderError.TX_NOT_FOUND`; caller must verify hash and network |
+| Malformed XDR in envelope | `RecorderError.PARSE_FAILED` with the offending operation index |
+| Fee-bump inner tx decode error | Outer envelope returned with `feeBumpParseError: true`; inner tx skipped |
+
+All recorder errors are non-retried by default. The MCP `record_transaction` tool returns
+`{ ok: false, error: { code, message } }` and leaves the session in `[INIT]` state.
+
+### 11.2 Claude API Failures During Synthesis
+
+| Failure | Behaviour |
+|---------|-----------|
+| API key missing or invalid | `SynthesizerError.AUTH_FAILED` at startup; server refuses to start |
+| Rate limit (429) | Exponential backoff with 3 retries (1s, 4s, 16s); error returned after 3rd failure |
+| Context window exceeded | Synthesizer truncates ledger change entries first (lowest signal), then retries |
+| Model returns non-JSON | Response discarded; synthesizer falls back to template-only (Layer 1) output |
+
+Layer 1 (Handlebars template) codegen never calls the Claude API and is therefore
+immune to API failures. Layer 2 (AI codegen) failures produce a partial result:
+the policy proposal is returned without the AI-generated constraint logic, with
+`ai_layer_failed: true` in the response so the caller knows to review manually.
+
+### 11.3 Soroban RPC Failures During Simulation
+
+| Failure | Behaviour |
+|---------|-----------|
+| RPC unreachable | `HarnessError.RPC_UNAVAILABLE`; simulation aborted, partial report returned |
+| `simulateTransaction` returns error | Treated as a deny result for permit cases (unexpected deny flagged as issue) |
+| Ledger sequence too old | Test transaction rebuilt with current ledger + TTL; single retry |
+| Resource exhaustion (instructions exceeded) | Case marked as `RESOURCE_EXCEEDED`, not PASS or FAIL; flagged in report |
+
+The simulation report always returns even on partial failure — `coverage_score` reflects
+only the cases that completed. Incomplete cases are listed in `issues[]` with reason
+`SIMULATION_ERROR`.
+
+### 11.4 Session Expiry
+
+Sessions are in-memory with a TTL of 1 hour (configurable via `OZ_POLICY_SESSION_TTL_MINS`).
+
+| Scenario | Behaviour |
+|----------|-----------|
+| Tool call on expired session | `SessionError.EXPIRED`; client must start a new session with `record_transaction` |
+| Server restart | All sessions lost; in-memory only by design (no persistence layer) |
+| Concurrent tool calls on same session | Last-write-wins on session state; sequential calls are expected by the MCP protocol |
+
+### 11.5 Generated Code Validation Failures
+
+If the synthesizer's post-generation validation rejects AI output (see §9.2 invariants):
+
+| Violation | Behaviour |
+|-----------|-----------|
+| `unsafe` block detected | Code rejected; `CodegenError.UNSAFE_BLOCK` returned; no file written |
+| Bare `panic!` detected | Code rejected; `CodegenError.BARE_PANIC` returned |
+| Missing double-key pattern | Code rejected; `CodegenError.STORAGE_KEY_VIOLATION` |
+| Any validation failure | Synthesizer retries Layer 2 once with an explicit constraint in the prompt; if second attempt also fails, returns Layer 1 output only with `ai_layer_failed: true` |
+
+---
+
 ## Appendix A: Stellar SDK Usage Reference
 
 | SDK Component | Used by | Purpose |
@@ -1440,10 +1515,16 @@ The `demo/run-demo.sh` script generates reproducible output in `demo/output/`:
 
 | Network | OZ Smart Account Factory | Status |
 |---------|------------------------|--------|
-| Stellar Testnet | Deployed (see OZ docs) | Active |
-| Stellar Mainnet | Deployed (see OZ docs) | Active |
+| Stellar Testnet | See [OpenZeppelin Stellar docs](https://docs.openzeppelin.com/stellar) for the current factory address | Active |
+| Stellar Mainnet | See [OpenZeppelin Stellar docs](https://docs.openzeppelin.com/stellar) for the current factory address | Active |
 
-Policy contracts are deployed by the user at the address returned by `soroban contract deploy`.
+The OZ Smart Account factory addresses are maintained by OpenZeppelin and subject to
+change with upgrades. Always fetch the current address from the official OZ documentation
+rather than hardcoding.
+
+Policy contracts built by this tool are deployed by the developer at the C-address
+returned by `soroban contract deploy`. Deployed addresses for each network are recorded
+in `docs/TESTNET.md` and `docs/MAINNET.md` at the T1 milestone.
 
 ## Appendix C: Key Design Decisions
 
