@@ -3,7 +3,155 @@
 **Version:** 1.0.0  
 **Status:** Active  
 **Track:** Stellar RMF — AI / Agent-Readiness & Smart Account Adoption (Q2 2026)  
-**Last Updated:** 2026-06-14
+**Last Updated:** 2026-06-15
+
+---
+
+## How It Works
+
+OZ Accounts Policy Builder converts observed Stellar transactions into deployable
+OpenZeppelin Smart Account policies — automatically, with minimal human effort.
+
+The core idea: **show the tool what an agent does, and it derives the minimal
+permission set that covers exactly that behaviour and nothing more.**
+
+### End-to-End Workflow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                    HOW OZ ACCOUNTS POLICY BUILDER WORKS                         │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+  You (developer or AI agent)
+        │
+        │  "I want to delegate Soroswap trading to a bot — here is a sample tx"
+        │
+        ▼
+┌───────────────────┐
+│   1. RECORD       │  Feed a real Stellar transaction hash (or XDR).
+│                   │  The tool fetches it from Horizon, parses every
+│   tx hash / XDR  │  contract call, resolves asset transfers (SAC tokens
+│   → call graph    │  with 7-decimal precision), and unwraps fee-bump
+│   → asset flows   │  envelopes and execute() sub-invocations.
+└────────┬──────────┘
+         │
+         │  RecordedTransaction: {invocations[], assetTransfers[], ledgerChanges[]}
+         ▼
+┌───────────────────┐
+│   2. SYNTHESIZE   │  AI engine runs 6 stages:
+│                   │    ① Extract call graph → ContextRule scope
+│   call graph      │    ② Infer delegation lifetime (default 90 days)
+│   + asset flows   │    ③ Derive asset spending caps from observed amounts
+│   → policy set    │    ④ Select policy types (spending / time / frequency /
+│   + questions     │       call-filter / composite)
+│                   │    ⑤ Generate Rust code (template-first, AI for novel cases)
+│                   │    ⑥ Surface clarifying questions for ambiguous parameters
+└────────┬──────────┘
+         │
+         │  PolicyProposal: {context_rule, policies[], clarifying_questions[]}
+         ▼
+┌───────────────────┐
+│   3. CLARIFY      │  The tool asks only what it cannot infer:
+│                   │    • "Confirm spending cap: 500 USDC/day?"
+│   Q&A loop        │    • "Delegation lifetime: 90 days?"
+│   tightens the    │    • "Lock recipient address to observed value?"
+│   policy output   │  You answer; the proposal tightens. One round is typical.
+└────────┬──────────┘
+         │
+         │  Refined PolicyProposal + GeneratedCode (Rust source + install script)
+         ▼
+┌───────────────────┐
+│   4. SIMULATE     │  Before any on-chain action, the harness runs the
+│                   │  generated policy against Soroban RPC:
+│   permit cases    │    ✓ Permit cases — intended txs must pass
+│   deny cases      │    ✗ Deny cases  — 6 mutation types must all fail:
+│   → coverage      │        exceed_spending · wrong_asset · out_of_window
+│     report        │        extra_invocation · expired_rule · wrong_function
+│                   │  Coverage score (0.0–1.0) tells you how well the
+│                   │  policy blocks the full attack surface.
+└────────┬──────────┘
+         │
+         │  SimulationReport: {permit_results[], deny_results[], coverage_score}
+         ▼
+┌───────────────────┐
+│   5. REVIEW       │  All output is human-readable before any deployment:
+│                   │    • Rust policy contract source (compilable, auditable)
+│   Rust source     │    • TypeScript install helper script
+│   install script  │    • JSON ContextRule configuration
+│   XDR preview     │    • Unsigned XDR for add_context_rule + add_policy
+│                   │  The tool NEVER submits a transaction automatically.
+└────────┬──────────┘
+         │
+         │  WalletIntegrationBundle: {unsigned XDR × N, install_script.ts}
+         ▼
+┌───────────────────┐
+│   6. DEPLOY       │  You compile, deploy (if a new contract is needed),
+│                   │  and sign + submit the install XDR.
+│   sign & submit   │  On-chain writes are always user-initiated.
+│   → policy lives  │
+│     on-chain      │  Result: the OZ Smart Account now enforces the policy
+│                   │  on every invocation that matches the delegated scope.
+└───────────────────┘
+```
+
+### What Gets Generated
+
+Depending on the observed transaction, the tool produces one of two outputs:
+
+```
+Mode (a) — OZ Primitive is sufficient
+  Output: JSON config for an existing OZ policy (simple_threshold,
+          weighted_threshold, spending_limit)
+  → No new contract needed. Install directly.
+
+Mode (b) — Novel constraint required
+  Output: compilable Rust source + Cargo.toml + TypeScript install helper
+  → Compile → deploy WASM → install on smart account.
+
+  Generated contracts are always:
+    • #![no_std]  ·  no unsafe blocks  ·  double-keyed storage
+    • overflow-checks = true  ·  only soroban-sdk imports
+```
+
+### The Five Policy Types
+
+```
+  "How much can be spent?"  →  spending-limit   (asset cap + period reset)
+  "During which window?"    →  time-bound        (start/end ledger range)
+  "Which calls exactly?"    →  call-filter       (contract + fn + arg constraints)
+  "How many times?"         →  frequency-limit   (max N calls per window)
+  "All constraints at once" →  composite         (AND-compose up to 8 policies)
+```
+
+### How an AI Agent Uses It
+
+```
+  AI Agent                        OZ Policy Builder (MCP Server)
+     │                                       │
+     │── record_transaction(tx_hash) ───────►│ parse tx, store in session
+     │◄─ {session_id, invocations[]} ────────│
+     │                                       │
+     │── synthesize_policy(session_id) ─────►│ 6-stage synthesis
+     │◄─ {proposal, questions[]} ────────────│
+     │                                       │
+     │── answer_clarification(q_id, ans) ───►│ refine proposal
+     │◄─ {updated_proposal} ─────────────────│
+     │                                       │
+     │── generate_code(session_id) ─────────►│ Handlebars + Claude API
+     │◄─ {rust_source, install_script} ──────│
+     │                                       │
+     │── simulate_policy(session_id) ───────►│ Soroban RPC permit/deny run
+     │◄─ {coverage_score, issues[]} ─────────│
+     │                                       │
+     │── install_policy(session_id) ────────►│ build unsigned XDR
+     │◄─ {add_context_rule_xdr,              │
+     │    add_policy_xdr[]} ─────────────────│
+     │                                       │
+  (human signs + submits XDR)
+     │
+     ▼
+  Policy live on Stellar ✓
+```
 
 ---
 
