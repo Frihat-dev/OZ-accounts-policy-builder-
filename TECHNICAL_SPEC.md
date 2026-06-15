@@ -119,12 +119,15 @@ Composition rule: **always compose existing primitives first; generate net-new c
                    │       MCP Server        │
                    │    (mcp-server/)        │
                    │                         │
-                   │  Tools:                 │
+                   │  8 Tools:               │
                    │  • record_transaction   │
+                   │  • list_invocations     │
                    │  • synthesize_policy    │
-                   │  • simulate_policy      │
+                   │  • answer_clarification │
                    │  • generate_code        │
-                   │  • verify_policy        │
+                   │  • simulate_policy      │
+                   │  • get_simulation_report│
+                   │  • install_policy       │
                    └───┬────────┬────────────┘
                        │        │
           ┌────────────▼──┐  ┌──▼─────────────┐
@@ -161,7 +164,7 @@ Composition rule: **always compose existing primitives first; generate net-new c
    }
 
 2. SYNTHESIZE
-   input:  RecordedTransaction[] (one or more representative txs)
+   input:  RecordedTransaction[] (one or more representative txs — multi-tx is base scope per RFP §3.2)
    output: PolicyProposal {
      context_rule: ContextRuleSpec,
      policies: Vec<PolicySpec>,
@@ -249,6 +252,13 @@ async function recordFromHash(
   network: Network,
   options?: RecordOptions
 ): Promise<RecordedTransaction>
+
+// Multi-tx recording — base scope per RFP §3.2 "transaction(s)"
+async function recordFromHashes(
+  txHashes: string[],
+  network: Network,
+  options?: RecordOptions
+): Promise<RecordedTransaction[]>
 
 async function recordFromSimulation(
   simulationResponse: SorobanRpc.Api.SimulateTransactionResponse,
@@ -436,6 +446,7 @@ Session {
 | `synthesize_from_description` | "I want to delegate Blend yield claiming" |
 | `review_generated_policy` | "review the generated policy for me" |
 | `explain_policy` | "what does this policy allow/deny?" |
+| `propose_delegation` | "I'm an agent; here are my planned operations; what permissions do I need?" |
 
 #### Clarification Logic
 
@@ -459,36 +470,54 @@ ASSUME (with rationale in output):
 
 ### 6.1 Policy Trait Interface
 
+The OZ smart account passes a full `ContextRule` struct to every policy call. The `context_rule.id` field (`u32`) is the storage key — not a `BytesN<32>` hash.
+
 ```rust
-// oz_policy_trait/src/lib.rs
-pub trait Policy {
-    fn install(
-        env: Env,
-        smart_account: Address,
-        context_rule_id: BytesN<32>,
-        config: Map<Symbol, Val>,
-    );
+// contracts/shared/policy-trait/src/lib.rs
 
-    fn can_enforce(
-        env: Env,
-        smart_account: Address,
-        context_rule_id: BytesN<32>,
-        invocation: AuthInvocation,
-    ) -> bool;
-
-    fn enforce(
-        env: Env,
-        smart_account: Address,
-        context_rule_id: BytesN<32>,
-        invocation: AuthInvocation,
-    );
-
-    fn uninstall(
-        env: Env,
-        smart_account: Address,
-        context_rule_id: BytesN<32>,
-    );
+/// Full context rule as passed by the OZ smart account to policy entry-points.
+/// id is a monotonically incrementing u32 unique within one smart account.
+#[contracttype]
+pub struct ContextRule {
+    pub id: u32,                        // storage key — NOT BytesN<32>
+    pub context_type: ContextRuleType,
+    pub name: String,
+    pub signers: Vec<Signer>,
+    pub signer_ids: Vec<u32>,
+    pub policies: Vec<Address>,
+    pub policy_ids: Vec<u32>,
+    pub valid_until: Option<u32>,       // ledger sequence, None = no expiry
 }
+
+// All policy contracts expose these four entry-points:
+
+fn install(
+    env: Env,
+    install_params: PolicyParams,       // typed struct per policy, NOT Map<Symbol,Val>
+    context_rule: ContextRule,
+    smart_account: Address,
+);
+
+fn enforce(
+    env: Env,
+    context: Context,                   // soroban_sdk::auth::Context
+    authenticated_signers: Vec<Signer>,
+    context_rule: ContextRule,
+    smart_account: Address,
+);
+
+fn uninstall(
+    env: Env,
+    context_rule: ContextRule,
+    smart_account: Address,
+);
+
+fn can_enforce(
+    env: Env,
+    context: Context,
+    context_rule: ContextRule,
+    smart_account: Address,
+) -> bool;                              // read-only pre-check; returns false vs. panicking
 ```
 
 ### 6.2 Policy Contracts
@@ -499,19 +528,19 @@ pub trait Policy {
 | `time-bound` | Custom | Ledger/timestamp range enforcement |
 | `call-filter` | Custom | Allowlist of (contract, function, args) |
 | `frequency-limit` | Custom | Max N invocations per time period |
-| `composite` | Custom | AND-compose up to 4 sub-policies |
+| `composite` | Custom | AND-compose up to 8 sub-policies |
 
 ### 6.3 Storage Key Convention
 
-All policies follow this storage key pattern:
+All policies follow this storage key pattern. The key type is `u32` (from `context_rule.id`), not `BytesN<32>`:
 
 ```rust
 #[contracttype]
 pub enum DataKey {
     // Global policy config (set at install, immutable)
-    Config(Address, BytesN<32>),     // (smart_account, context_rule_id)
+    Config(Address, u32),     // (smart_account, context_rule.id)
     // Per-period mutable state
-    State(Address, BytesN<32>),      // (smart_account, context_rule_id)
+    State(Address, u32),      // (smart_account, context_rule.id)
 }
 ```
 
@@ -621,7 +650,20 @@ Generated output:
 
 ## 10. Open Questions / Future Work
 
-- Can the synthesizer detect reentrancy risks in the observed call graph? (V2)
-- Should the tool support multi-tx sequence policies (e.g. must call A before B)? (V2)
-- Upstream useful custom policies back to OZ accounts package (coordination needed)
-- Ledger-based vs timestamp-based lifetime: the tool currently prefers timestamp; should it prefer ledger for determinism?
+**In scope (V1):**
+- Multi-tx recording (`recordFromHashes[]`) — base scope per RFP §3.2 "(s)"; spending cap
+  inferred from maximum observed amount across all input transactions
+- Agent self-delegation (`propose_delegation`) — D3.0; agent describes planned operations,
+  tool derives minimal policy set for human review and approval
+- OZ coordination (non-billed) — design reviews + generated code feedback with OZ team;
+  candidates for upstreaming identified in `docs/oz-coordination/`
+
+**Post-V1 (V2 candidates):**
+- Reentrancy risk detection in the observed call graph (V2)
+- Multi-tx sequence policies — "must call A before B" ordering constraints (V2)
+- Live account policy audit (`inspect_account`) — fetch and explain installed context rules
+  on any live C-address (V2; dropped from V1 to keep scope coherent)
+- Protocol-aware templates — Blend, Soroswap, SEP-41 adapter registry with pre-populated
+  defaults (V2; dropped from V1)
+- Ledger-based vs timestamp-based lifetime: currently prefers timestamp; ledger gives more
+  determinism (V2 preference setting)
